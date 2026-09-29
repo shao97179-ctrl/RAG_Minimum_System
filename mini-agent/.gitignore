@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+wheels/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 环境变量（不提交真实 API Key）
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ChromaDB 数据（可重新生成）
+data/chroma_db/
+
+# 日志文件（每天一个，自动清理）
+logs/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# uv
+uv.lock
