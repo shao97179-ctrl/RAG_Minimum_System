@@ -32,9 +32,12 @@ from app.rag.vector_store import search as vector_search
 logger = logging.getLogger(__name__)
 
 
-def retrieve(query: str, history: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+async def retrieve(query: str, history: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """
     执行完整的检索流水线: 问题重写 → 向量粗检索 → 重排。
+
+    三步之间有数据依赖（后一步用前一步的结果），因此顺序 await；
+    一次检索会发起多次 LLM/Embedding 网络请求，全部为异步调用。
 
     参数:
         query: 用户的原始问题
@@ -47,11 +50,11 @@ def retrieve(query: str, history: list[dict[str, Any]] | None = None) -> list[di
     # ① 问题重写: 失败时 rewrite_query 内部会退回原始查询
     search_query = query
     if RAG_REWRITE_ENABLED:
-        search_query = rewrite_query(query, history)
+        search_query = await rewrite_query(query, history)
 
     # ② 向量粗检索: 召回比 top_k 更多的候选，给重排留出挑选空间
     candidate_k = max(RAG_CANDIDATE_K, RAG_TOP_K)
-    candidates = vector_search(search_query, top_k=candidate_k)
+    candidates = await vector_search(search_query, top_k=candidate_k)
 
     if not candidates:
         logger.info("No candidates retrieved for: %s", search_query)
@@ -60,7 +63,7 @@ def retrieve(query: str, history: list[dict[str, Any]] | None = None) -> list[di
     # ③ 重排: LLM 给候选按相关性打分排序，取 top_k；
     #    只有一个候选时没有可比较的对象，跳过重排
     if RAG_RERANK_ENABLED and len(candidates) > 1:
-        results = rerank_documents(search_query, candidates, top_k=RAG_TOP_K)
+        results = await rerank_documents(search_query, candidates, top_k=RAG_TOP_K)
     else:
         results = candidates[:RAG_TOP_K]
 

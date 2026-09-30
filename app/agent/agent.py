@@ -12,9 +12,7 @@ Agent 核心循环模块。
     ┌─ 不需要 → 直接返回回答
     └─ 需要   → Function Calling
                 ↓
-            Tool Dispatcher
-                ↓
-            执行对应工具
+            Tool Dispatcher（多个工具 asyncio.gather 并发执行）
                 ↓
             Tool Result
                 ↓
@@ -23,12 +21,14 @@ Agent 核心循环模块。
             GLM 最终回答
 
 支持：
+- 全流程异步（async/await），LLM 调用与工具执行都不阻塞事件循环
 - 多轮对话（维护 messages 历史）
-- 一次返回多个 Tool Call
+- 一次返回多个 Tool Call 时并发执行所有工具
 - 工具执行完成后自动再次调用 LLM 生成最终回答
 - 上下文压缩（每轮开始时检查，历史过大则压缩，见 context_manager.py）
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -47,16 +47,19 @@ logger = logging.getLogger(__name__)
 MAX_ITERATIONS = 5
 
 
-def process_tool_calls(
+async def process_tool_calls(
     tool_calls: list[Any],
     history: list[dict[str, Any]] | None = None,
-) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """
     处理 LLM 返回的所有 tool_call。
 
-    遍历每个 tool_call:
+    多个工具调用之间没有依赖，用 asyncio.gather 并发执行，
+    总耗时约等于最慢的那个工具（而不是所有工具耗时之和）。
+
+    对每个 tool_call:
     1. 读取工具名称和参数
-    2. 通过 Tool Dispatcher 执行
+    2. 通过 Tool Dispatcher 并发执行
     3. 构造 assistant 消息（含 tool_call 信息）
     4. 构造 tool 结果消息
 
@@ -70,8 +73,10 @@ def process_tool_calls(
         - assistant_message: 包含 tool_call 信息的 assistant 消息
         - tool_messages: 所有工具结果消息列表
     """
-    tool_messages: list[dict[str, str]] = []
     assistant_tool_calls: list[dict[str, Any]] = []
+
+    # 先解析所有调用并记录 assistant 的 tool_call 信息
+    parsed: list[tuple[str, str, str, dict[str, Any]]] = []
 
     for tool_call in tool_calls:
         tool_name = tool_call.function.name
@@ -80,10 +85,6 @@ def process_tool_calls(
 
         logger.info("Agent decided to call tool: %s", tool_name)
 
-        # 解析参数
-        tool_args = parse_tool_args(tool_args_str)
-
-        # 记录 assistant 的 tool_call 信息（后续需要加入消息历史）
         assistant_tool_calls.append({
             "id": tool_call_id,
             "type": "function",
@@ -93,12 +94,20 @@ def process_tool_calls(
             },
         })
 
-        # 执行工具（对话历史会注入给需要的工具）
-        result = dispatch_tool(tool_name, tool_args, history=history)
+        parsed.append((tool_call_id, tool_name, tool_args_str,
+                       parse_tool_args(tool_args_str)))
 
-        # 构造 tool 结果消息
-        tool_msg = build_tool_message(tool_call_id, tool_name, result)
-        tool_messages.append(tool_msg)
+    # 并发执行所有工具（历史会注入给声明了 history 参数的工具）
+    results = await asyncio.gather(*(
+        dispatch_tool(tool_name, tool_args, history=history)
+        for _, tool_name, _, tool_args in parsed
+    ))
+
+    # 构造 tool 结果消息（gather 保序，结果顺序与调用顺序一致）
+    tool_messages: list[dict[str, str]] = [
+        build_tool_message(tool_call_id, tool_name, result)
+        for (tool_call_id, tool_name, _, _), result in zip(parsed, results)
+    ]
 
     # 构造 assistant 消息（包含 tool_calls）
     assistant_message: dict[str, Any] = {
@@ -110,16 +119,16 @@ def process_tool_calls(
     return assistant_message, tool_messages
 
 
-def agent_loop(user_input: str, history: list[dict[str, Any]]) -> str:
+async def agent_loop(user_input: str, history: list[dict[str, Any]]) -> str:
     """
     Agent 主循环。
 
     流程:
     1. 将用户输入加入消息列表
     2. 检查上下文是否超限，超限则压缩（旧对话 → 摘要，新对话保留）
-    3. 调用 LLM
+    3. 异步调用 LLM
     4. 如果 LLM 返回 tool_call:
-       a. 执行工具
+       a. 并发执行工具
        b. 将结果返回给 LLM
        c. 再次调用 LLM 获取最终回答
     5. 如果 LLM 直接返回文本:
@@ -137,7 +146,7 @@ def agent_loop(user_input: str, history: list[dict[str, Any]]) -> str:
     logger.info("User query: %s", user_input)
 
     # 上下文压缩：历史超过 token 预算时，较早的轮次被压缩成摘要
-    if compress_history(history):
+    if await compress_history(history):
         logger.info(
             "Context compressed: %d messages, ~%d tokens now",
             len(history),
@@ -151,8 +160,8 @@ def agent_loop(user_input: str, history: list[dict[str, Any]]) -> str:
     for iteration in range(MAX_ITERATIONS):
         logger.debug("Agent loop iteration %d", iteration + 1)
 
-        # 调用 LLM
-        response = chat_with_tools(messages, TOOLS)
+        # 异步调用 LLM
+        response = await chat_with_tools(messages, TOOLS)
 
         # 解析响应
         choice = response.choices[0]
@@ -165,8 +174,8 @@ def agent_loop(user_input: str, history: list[dict[str, Any]]) -> str:
                 len(assistant_msg.tool_calls),
             )
 
-            # 处理所有 tool_call（历史会注入给声明了 history 参数的工具）
-            assistant_message, tool_messages = process_tool_calls(
+            # 并发处理所有 tool_call（历史会注入给声明了 history 参数的工具）
+            assistant_message, tool_messages = await process_tool_calls(
                 assistant_msg.tool_calls, history=history
             )
 

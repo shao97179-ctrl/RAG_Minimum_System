@@ -112,26 +112,26 @@ class TestSplitIntoTurns:
 
 
 class TestCompressHistory:
-    """压缩逻辑测试（注入假摘要函数，不调用真实 API）。"""
+    """压缩逻辑测试（注入异步假摘要函数，不调用真实 API）。"""
 
-    def test_under_limit_no_change(self) -> None:
+    async def test_under_limit_no_change(self) -> None:
         """未超限时不应压缩。"""
         history = make_turn("你好", "你好！")
 
-        def should_not_be_called(turns: list) -> str:
+        async def should_not_be_called(turns: list) -> str:
             raise AssertionError("未超限时不应调用摘要函数")
 
-        assert compress_history(history, summarize_fn=should_not_be_called) is False
+        assert await compress_history(history, summarize_fn=should_not_be_called) is False
         assert len(history) == 2
 
-    def test_over_limit_compresses_with_summary(self) -> None:
+    async def test_over_limit_compresses_with_summary(self) -> None:
         """超限时压缩：旧轮次变摘要，最近轮次保留。"""
         history = make_long_history(15)  # 约 9000 tokens > 6000
 
-        def fake_summarize(turns: list) -> str:
+        async def fake_summarize(turns: list) -> str:
             return "这是假摘要"
 
-        assert compress_history(history, summarize_fn=fake_summarize) is True
+        assert await compress_history(history, summarize_fn=fake_summarize) is True
 
         # 摘要消息应在开头
         assert history[0]["role"] == "system"
@@ -141,11 +141,14 @@ class TestCompressHistory:
         # 最近的对话必须保留（最后一轮内容还在）
         assert any("编号14" in str(m.get("content")) for m in history)
 
-    def test_summary_failure_falls_back_to_truncation(self) -> None:
+    async def test_summary_failure_falls_back_to_truncation(self) -> None:
         """摘要失败（返回 None）时，退化为丢弃旧轮次。"""
         history = make_long_history(15)
 
-        result = compress_history(history, summarize_fn=lambda turns: None)
+        async def fail_summarize(turns: list) -> None:
+            return None
+
+        result = await compress_history(history, summarize_fn=fail_summarize)
 
         assert result is True
         # 没有摘要消息，只有最近轮次
@@ -153,7 +156,7 @@ class TestCompressHistory:
         assert len(history) < 30
         assert any("编号14" in str(m.get("content")) for m in history)
 
-    def test_tool_message_not_orphaned(self) -> None:
+    async def test_tool_message_not_orphaned(self) -> None:
         """压缩后 tool 消息前面必须紧跟带 tool_calls 的 assistant 消息。"""
         history = make_long_history(3)
         # 在中间插入一轮带工具调用的对话
@@ -174,7 +177,10 @@ class TestCompressHistory:
         history.extend(tool_turn)
         history.extend(make_long_history(12))
 
-        assert compress_history(history, summarize_fn=lambda t: "摘要") is True
+        async def fake_summarize(turns: list) -> str:
+            return "摘要"
+
+        assert await compress_history(history, summarize_fn=fake_summarize) is True
 
         # 校验：每条 tool 消息的前一条必须是带 tool_calls 的 assistant
         for i, msg in enumerate(history):
@@ -183,12 +189,15 @@ class TestCompressHistory:
                 assert prev["role"] == "assistant"
                 assert prev.get("tool_calls"), "tool 消息被孤立了！"
 
-    def test_history_object_identity_preserved(self) -> None:
+    async def test_history_object_identity_preserved(self) -> None:
         """压缩必须就地修改，外部持有的引用仍然有效。"""
         history = make_long_history(15)
         outer_ref = history
 
-        compress_history(history, summarize_fn=lambda t: "摘要")
+        async def fake_summarize(turns: list) -> str:
+            return "摘要"
+
+        await compress_history(history, summarize_fn=fake_summarize)
 
         assert outer_ref is history  # 同一个列表对象
         assert len(outer_ref) < 30

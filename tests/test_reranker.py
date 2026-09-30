@@ -31,100 +31,100 @@ def _fake_llm(text: str):
 class TestRerankDocuments:
     """rerank_documents 测试。"""
 
-    def test_sorted_by_llm_score(self, monkeypatch) -> None:
+    async def test_sorted_by_llm_score(self, monkeypatch) -> None:
         """按 LLM 分数从高到低排序。"""
-        monkeypatch.setattr(
-            reranker,
-            "chat_without_tools",
-            lambda messages: _fake_llm(_llm_output({0: 3.0, 1: 9.0, 2: 1.0})),
-        )
 
-        results = reranker.rerank_documents("向量数据库", CANDIDATES, top_k=2)
+        async def fake_chat(messages: list[dict[str, str]]):
+            return _fake_llm(_llm_output({0: 3.0, 1: 9.0, 2: 1.0}))
+
+        monkeypatch.setattr(reranker, "chat_without_tools", fake_chat)
+
+        results = await reranker.rerank_documents("向量数据库", CANDIDATES, top_k=2)
 
         assert len(results) == 2
         assert results[0]["text"] == "Milvus 是分布式向量数据库"
         assert results[0]["rerank_score"] == 9.0
         assert results[1]["rerank_score"] == 3.0
 
-    def test_llm_failure_keeps_vector_order(self, monkeypatch) -> None:
+    async def test_llm_failure_keeps_vector_order(self, monkeypatch) -> None:
         """LLM 调用失败时退回向量检索的原始顺序。"""
 
-        def boom(messages: list[dict[str, str]]):
+        async def boom(messages: list[dict[str, str]]):
             raise RuntimeError("API down")
 
         monkeypatch.setattr(reranker, "chat_without_tools", boom)
 
-        results = reranker.rerank_documents("查询", CANDIDATES, top_k=2)
+        results = await reranker.rerank_documents("查询", CANDIDATES, top_k=2)
 
         assert [r["text"] for r in results] == [c["text"] for c in CANDIDATES[:2]]
         assert "rerank_score" not in results[0]
 
-    def test_unparseable_response_keeps_vector_order(self, monkeypatch) -> None:
+    async def test_unparseable_response_keeps_vector_order(self, monkeypatch) -> None:
         """模型输出不是合法 JSON 时退回原始顺序。"""
-        monkeypatch.setattr(
-            reranker,
-            "chat_without_tools",
-            lambda messages: _fake_llm("我觉得都还行"),
-        )
 
-        results = reranker.rerank_documents("查询", CANDIDATES, top_k=3)
+        async def fake_chat(messages: list[dict[str, str]]):
+            return _fake_llm("我觉得都还行")
+
+        monkeypatch.setattr(reranker, "chat_without_tools", fake_chat)
+
+        results = await reranker.rerank_documents("查询", CANDIDATES, top_k=3)
 
         assert [r["text"] for r in results] == [c["text"] for c in CANDIDATES]
 
-    def test_json_with_code_fence(self, monkeypatch) -> None:
+    async def test_json_with_code_fence(self, monkeypatch) -> None:
         """模型输出带 ```json 围栏也能解析。"""
         text = "```json\n" + _llm_output({0: 1.0, 1: 5.0, 2: 8.0}) + "\n```"
-        monkeypatch.setattr(
-            reranker,
-            "chat_without_tools",
-            lambda messages: _fake_llm(text),
-        )
 
-        results = reranker.rerank_documents("查询", CANDIDATES, top_k=1)
+        async def fake_chat(messages: list[dict[str, str]]):
+            return _fake_llm(text)
+
+        monkeypatch.setattr(reranker, "chat_without_tools", fake_chat)
+
+        results = await reranker.rerank_documents("查询", CANDIDATES, top_k=1)
 
         assert results[0]["text"] == "今天天气不错"
         assert results[0]["rerank_score"] == 8.0
 
-    def test_missing_ids_score_zero(self, monkeypatch) -> None:
+    async def test_missing_ids_score_zero(self, monkeypatch) -> None:
         """模型漏掉的候选按 0 分处理，排到最后。"""
-        monkeypatch.setattr(
-            reranker,
-            "chat_without_tools",
-            lambda messages: _fake_llm(_llm_output({1: 5.0})),
-        )
 
-        results = reranker.rerank_documents("查询", CANDIDATES, top_k=3)
+        async def fake_chat(messages: list[dict[str, str]]):
+            return _fake_llm(_llm_output({1: 5.0}))
+
+        monkeypatch.setattr(reranker, "chat_without_tools", fake_chat)
+
+        results = await reranker.rerank_documents("查询", CANDIDATES, top_k=3)
 
         assert results[0]["text"] == "Milvus 是分布式向量数据库"
         assert results[1]["text"] == "ChromaDB 是一个轻量级向量数据库"
         assert results[2]["text"] == "今天天气不错"
 
-    def test_score_clamped_to_range(self, monkeypatch) -> None:
+    async def test_score_clamped_to_range(self, monkeypatch) -> None:
         """模型输出超范围分数会被截断到 0~10。"""
-        monkeypatch.setattr(
-            reranker,
-            "chat_without_tools",
-            lambda messages: _fake_llm(_llm_output({0: 99.0, 1: -5.0, 2: 5.0})),
-        )
 
-        results = reranker.rerank_documents("查询", CANDIDATES, top_k=3)
+        async def fake_chat(messages: list[dict[str, str]]):
+            return _fake_llm(_llm_output({0: 99.0, 1: -5.0, 2: 5.0}))
+
+        monkeypatch.setattr(reranker, "chat_without_tools", fake_chat)
+
+        results = await reranker.rerank_documents("查询", CANDIDATES, top_k=3)
 
         assert results[0]["rerank_score"] == 10.0
         assert results[2]["rerank_score"] == 0.0
 
-    def test_empty_candidates(self) -> None:
+    async def test_empty_candidates(self) -> None:
         """空候选直接返回空列表。"""
-        assert reranker.rerank_documents("查询", [], top_k=3) == []
+        assert await reranker.rerank_documents("查询", [], top_k=3) == []
 
-    def test_does_not_mutate_input(self, monkeypatch) -> None:
+    async def test_does_not_mutate_input(self, monkeypatch) -> None:
         """重排不改动调用方传入的候选列表。"""
-        monkeypatch.setattr(
-            reranker,
-            "chat_without_tools",
-            lambda messages: _fake_llm(_llm_output({0: 1.0, 1: 9.0, 2: 5.0})),
-        )
 
-        reranker.rerank_documents("查询", CANDIDATES, top_k=3)
+        async def fake_chat(messages: list[dict[str, str]]):
+            return _fake_llm(_llm_output({0: 1.0, 1: 9.0, 2: 5.0}))
+
+        monkeypatch.setattr(reranker, "chat_without_tools", fake_chat)
+
+        await reranker.rerank_documents("查询", CANDIDATES, top_k=3)
 
         assert CANDIDATES[0]["text"] == "ChromaDB 是一个轻量级向量数据库"
         assert "rerank_score" not in CANDIDATES[0]

@@ -15,7 +15,7 @@
 """
 
 import logging
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from app.config import KEEP_RECENT_TOKENS, MAX_CONTEXT_TOKENS
 from app.llm import chat_without_tools
@@ -100,9 +100,9 @@ def split_into_turns(history: list[dict[str, Any]]) -> list[list[dict[str, Any]]
 # 摘要生成
 # ──────────────────────────────────────────────
 
-def summarize_turns(turns: list[list[dict[str, Any]]]) -> str | None:
+async def summarize_turns(turns: list[list[dict[str, Any]]]) -> str | None:
     """
-    用 LLM 为较早的对话轮次生成摘要。
+    用 LLM 为较早的对话轮次生成摘要（异步调用）。
 
     返回摘要文本；调用失败时返回 None（调用方退化为直接截断）。
     """
@@ -136,7 +136,7 @@ def summarize_turns(turns: list[list[dict[str, Any]]]) -> str | None:
     )
 
     try:
-        response = chat_without_tools([{"role": "user", "content": prompt}])
+        response = await chat_without_tools([{"role": "user", "content": prompt}])
         summary = response.choices[0].message.content or ""
         logger.info("Generated summary for %d old turns (%d chars)", len(turns), len(summary))
         return summary
@@ -149,16 +149,16 @@ def summarize_turns(turns: list[list[dict[str, Any]]]) -> str | None:
 # 压缩入口
 # ──────────────────────────────────────────────
 
-def compress_history(
+async def compress_history(
     history: list[dict[str, Any]],
-    summarize_fn: Callable[[list[list[dict[str, Any]]]], str | None] | None = None,
+    summarize_fn: Callable[[list[list[dict[str, Any]]]], Awaitable[str | None]] | None = None,
 ) -> bool:
     """
-    如果历史超过 token 预算，就地压缩它。
+    如果历史超过 token 预算，就地异步压缩它。
 
     参数:
         history: 对话历史（会被就地修改，列表对象本身保持不变）
-        summarize_fn: 摘要函数（注入用于测试，默认用 LLM 摘要）
+        summarize_fn: 异步摘要函数（注入用于测试，默认用 LLM 摘要）
 
     返回:
         是否执行了压缩
@@ -199,7 +199,7 @@ def compress_history(
     )
 
     # 旧轮次生成摘要；失败时退化为直接丢弃
-    summary = summarize_fn(old_turns)
+    summary = await summarize_fn(old_turns)
 
     new_history: list[dict[str, Any]] = []
     if summary:

@@ -21,7 +21,7 @@ from app.rag.vector_store import is_index_built
 logger = logging.getLogger(__name__)
 
 
-def search_knowledge_base(
+async def search_knowledge_base(
     query: str,
     history: list[dict[str, Any]] | None = None,
 ) -> str:
@@ -41,13 +41,13 @@ def search_knowledge_base(
     logger.info("RAG search: %s", query)
 
     # 检查索引是否已构建
-    if not is_index_built():
+    if not await is_index_built():
         logger.warning("Knowledge base index not built")
         return "知识库尚未初始化，请先运行知识库索引构建（python main.py --init-rag）。"
 
     # 完整检索流水线: 问题重写 → 向量粗检索 → 重排
     try:
-        results = retrieve(query, history=history)
+        results = await retrieve(query, history=history)
     except Exception as e:
         logger.error("RAG search failed: %s", e)
         return f"知识库检索失败: {e}"

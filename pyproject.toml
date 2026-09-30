@@ -11,6 +11,16 @@ dependencies = []
 [project.scripts]
 mini-agent = "mini_agent:main"
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=1.0",
+]
+
+[tool.pytest.ini_options]
+# async def test_... 自动被识别为异步测试，无需逐个加标记
+asyncio_mode = "auto"
+
 [build-system]
 requires = ["uv_build>=0.12.7,<0.13.0"]
 build-backend = "uv_build"

@@ -36,15 +36,10 @@ class TestFormatWeather:
 class TestGetWeather:
     """get_weather 函数测试。"""
 
-    def test_empty_api_key(self) -> None:
+    async def test_empty_api_key(self, monkeypatch) -> None:
         """API Key 未配置时返回错误。"""
-        # 临时清空 API Key
-        import app.config as config
-        original = config.OPENWEATHER_API_KEY
-        config.OPENWEATHER_API_KEY = ""
+        import app.tools.weather as weather_mod
+        monkeypatch.setattr(weather_mod, "OPENWEATHER_API_KEY", "")
 
-        try:
-            result = get_weather("北京")
-            assert "错误" in result
-        finally:
-            config.OPENWEATHER_API_KEY = original
+        result = await get_weather("北京")
+        assert "错误" in result

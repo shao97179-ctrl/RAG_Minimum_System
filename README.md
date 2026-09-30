@@ -58,6 +58,52 @@ LLM 判断是否需要工具
 
 ---
 
+## 全流程异步与指数退避
+
+### 异步（async/await）
+
+整个调用链全部异步化，网络等待期间事件循环可以去跑别的协程：
+
+- **LLM / Embedding**（`app/llm.py`）：智谱官方 SDK 是同步的，
+  用 `asyncio.to_thread` 把它放进线程池执行，对外暴露 `async` 接口
+- **天气 API**（`app/tools/weather.py`）：原生 `httpx.AsyncClient` 异步请求
+- **工具并发执行**（`app/agent/agent.py`）：LLM 一次返回多个 tool_call 时，
+  用 `asyncio.gather` 并发执行所有工具，总耗时约等于最慢的那个
+- **批量嵌入**（`app/rag/embedder.py`）：建索引时用信号量限制并发生成
+  Embedding（同时最多 5 个请求），比逐条串行快很多
+- **入口**（`main.py`）：`asyncio.run()` 启动事件循环
+
+### 指数退避（`app/backoff.py`）
+
+网络请求偶尔会因为限流、超时、服务端抖动而失败，这类失败
+"等一会儿再试"通常就能成功。所有网络调用都经过统一的
+`with_backoff()` 重试：
+
+```
+第 1 次重试等 1 秒 → 第 2 次等 2 秒 → 第 3 次等 4 秒 ...
+（delay = base_delay * 2^重试次数，封顶 max_delay，叠加随机抖动防止扎堆）
+```
+
+只重试"值得重试"的异常，失败原因不同策略不同：
+
+| 请求 | 重试的异常 | 不重试（立即抛出） |
+|------|-----------|------------------|
+| LLM / Embedding | 连接失败、超时、429 限流、5xx 服务端错误 | 400 参数错误、401 鉴权失败 |
+| 天气 API | 超时、连接失败等临时网络问题 | 404 城市不存在、401 Key 无效 |
+
+重试次数和间隔在 `app/config.py` 里配置：
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `RETRY_MAX_RETRIES` | `3` | 失败后最多重试几次（总尝试 = 1 + 3） |
+| `RETRY_BASE_DELAY` | `1.0` | 首次重试等待秒数，之后按 2^n 增长 |
+| `RETRY_MAX_DELAY` | `20.0` | 单次重试等待的秒数上限 |
+
+重试过程会写入日志（`WARNING ... Retrying in 1.2s...`），
+重试次数用完仍失败才向上抛错。
+
+---
+
 ## 上下文管理
 
 对话历史不会无限增长：每轮开始前会检查历史大小，超过预算自动压缩。
@@ -203,19 +249,21 @@ mini-agent/
 │   ├── tools/                  # 工具实现
 │   │   ├── calculator.py       #   安全计算器（AST 求值）
 │   │   ├── rag.py              #   RAG 检索工具（调用完整检索流水线）
-│   │   └── weather.py          #   天气工具（OpenWeather API）
+│   │   ├── time_tool.py        #   时间工具
+│   │   └── weather.py          #   天气工具（OpenWeather API，异步 httpx）
 │   │
 │   ├── rag/                    # RAG 内部实现
 │   │   ├── loader.py           #   文档加载
 │   │   ├── chunker.py          #   文本切分
-│   │   ├── embedder.py         #   Embedding 生成
+│   │   ├── embedder.py         #   Embedding 生成（受限并发批量嵌入）
 │   │   ├── query_rewriter.py   #   问题重写（结合对话历史改写查询）
 │   │   ├── reranker.py         #   重排（LLM 相关性打分精排）
 │   │   ├── retriever.py        #   检索流水线（重写 → 粗检索 → 重排）
 │   │   └── vector_store.py     #   ChromaDB 向量存储
 │   │
+│   ├── backoff.py              # 指数退避重试（所有网络调用共用）
 │   ├── config.py               # 配置管理（环境变量）
-│   ├── llm.py                  # 智谱 AI LLM 调用封装
+│   ├── llm.py                  # 智谱 AI LLM 调用封装（异步 + 自动重试）
 │   └── logging_config.py       # 日志系统（文件日志 + 自动清理）
 │
 ├── data/
@@ -225,18 +273,21 @@ mini-agent/
 │
 ├── logs/                       # 日志文件（自动生成，按日期分文件）
 │
-├── tests/                      # 单元测试
+├── tests/                      # 单元测试（异步测试，pytest-asyncio）
+│   ├── test_backoff.py         #   指数退避测试
 │   ├── test_calculator.py
 │   ├── test_context_manager.py
+│   ├── test_logging_config.py
 │   ├── test_query_rewriter.py  #   问题重写测试
 │   ├── test_reranker.py        #   重排测试
 │   ├── test_retriever.py       #   检索流水线测试
+│   ├── test_tool_dispatcher.py
 │   ├── test_weather.py
-│   ├── test_rag.py
-│   └── test_tool_dispatcher.py
+│   └── test_rag.py
 │
 ├── .env.example                # 环境变量示例
 ├── .gitignore
+├── pyproject.toml
 ├── requirements.txt
 ├── main.py                     # 入口
 └── README.md
@@ -508,19 +559,20 @@ python -m pytest tests/ -v
 
 如果你想理解 Agent 是怎么运行的，按这个顺序读代码：
 
-1. **`main.py`** — 入口，看 Agent 如何启动、日志如何初始化
-2. **`app/agent/agent.py`** — **核心！** Agent 主循环，看 LLM → Tool → LLM 的完整流程
-3. **`app/agent/tool_dispatcher.py`** — **核心！** 工具分发器，看如何根据工具名找到并执行 Python 函数（含对话历史自动注入）
+1. **`main.py`** — 入口，看 Agent 如何启动、asyncio.run 如何驱动整个程序
+2. **`app/agent/agent.py`** — **核心！** Agent 主循环，看 LLM → Tool → LLM 的完整流程（多工具 gather 并发执行）
+3. **`app/agent/tool_dispatcher.py`** — **核心！** 工具分发器，看如何根据工具名找到并异步执行 Python 函数（含对话历史自动注入）
 4. **`app/agent/prompts.py`** — 工具定义，看 LLM 看到的 Tool Schema 是什么
 5. **`app/agent/context_manager.py`** — 上下文压缩：token 估算、按轮次分组、超限摘要
 6. **`app/rag/retriever.py`** — **核心！** 检索流水线：问题重写 → 向量粗检索 → 重排
 7. **`app/rag/query_rewriter.py`** — 问题重写：结合对话历史把问题改写成独立查询
 8. **`app/rag/reranker.py`** — 重排：LLM 给候选片段打相关性分并精排
-9. **`app/llm.py`** — LLM 调用封装
-10. **`app/tools/calculator.py`** — 计算器工具实现
-11. **`app/tools/weather.py`** — 天气工具实现
-12. **`app/tools/rag.py`** — RAG 工具实现（调用检索流水线）
-13. **`app/logging_config.py`** — 日志系统：文件日志、按日期分文件、自动清理
+9. **`app/backoff.py`** — 指数退避重试：所有网络调用的失败重试策略
+10. **`app/llm.py`** — LLM 调用封装（to_thread 包装同步 SDK + 自动重试）
+11. **`app/tools/calculator.py`** — 计算器工具实现
+12. **`app/tools/weather.py`** — 天气工具实现（异步 httpx + 退避重试）
+13. **`app/tools/rag.py`** — RAG 工具实现（调用检索流水线）
+14. **`app/logging_config.py`** — 日志系统：文件日志、按日期分文件、自动清理
 
 ---
 
@@ -532,8 +584,10 @@ python -m pytest tests/ -v
 | Embedding | 智谱 AI embedding-3 |
 | 向量数据库 | ChromaDB |
 | 天气 API | OpenWeather |
-| HTTP 客户端 | httpx |
+| HTTP 客户端 | httpx（异步 AsyncClient） |
+| 异步运行时 | asyncio（标准库） |
 | 配置管理 | python-dotenv |
+| 测试 | pytest + pytest-asyncio |
 
 ---
 

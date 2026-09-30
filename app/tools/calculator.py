@@ -35,9 +35,10 @@ UNARY_OPS: dict[type, Any] = {
 }
 
 
-def calculate(expression: str) -> str:
+async def calculate(expression: str) -> str:
     """
-    安全地计算数学表达式。
+    安全地计算数学表达式（异步接口，与所有工具保持统一，
+    Dispatcher 用 asyncio.gather 并发执行工具时可以统一 await）。
 
     只支持: + - * / % 和括号 ()，以及数字和一元正负号。
     不支持函数调用、属性访问、赋值等。

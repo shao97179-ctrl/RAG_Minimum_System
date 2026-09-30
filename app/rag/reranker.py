@@ -44,7 +44,7 @@ RERANK_PROMPT = """你是搜索结果相关性评估器。给定一个查询和�
 相关性分数 JSON:"""
 
 
-def rerank_documents(
+async def rerank_documents(
     query: str,
     candidates: list[dict[str, Any]],
     top_k: int = RAG_TOP_K,
@@ -65,7 +65,7 @@ def rerank_documents(
     if not candidates:
         return []
 
-    scores = _llm_rerank_scores(query, candidates)
+    scores = await _llm_rerank_scores(query, candidates)
 
     if scores is None:
         logger.info("Rerank unavailable, keeping vector search order")
@@ -91,7 +91,7 @@ def rerank_documents(
     return results
 
 
-def _llm_rerank_scores(
+async def _llm_rerank_scores(
     query: str,
     candidates: list[dict[str, Any]],
 ) -> list[float] | None:
@@ -107,7 +107,7 @@ def _llm_rerank_scores(
     )
 
     try:
-        response = chat_without_tools([{"role": "user", "content": prompt}])
+        response = await chat_without_tools([{"role": "user", "content": prompt}])
         content = (response.choices[0].message.content or "").strip()
     except Exception as e:
         logger.warning("Rerank LLM call failed: %s", e)

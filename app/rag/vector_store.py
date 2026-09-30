@@ -3,8 +3,14 @@
 
 使用 ChromaDB 存储文档的 Embedding 向量，
 支持插入和相似度检索。
+
+关于异步: Embedding 生成走网络请求，是真正的异步 I/O；
+ChromaDB 本身是同步的本地库，这里用 asyncio.to_thread
+把建索引、查询这类可能较慢的本地操作放进线程池，
+避免阻塞事件循环。
 """
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -12,7 +18,7 @@ from typing import Any
 import chromadb
 
 from app.config import CHROMA_DIR, RAG_TOP_K
-from app.rag.embedder import embed_text
+from app.rag.embedder import embed_text, embed_texts
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +53,12 @@ def get_or_create_collection(client: chromadb.PersistentClient) -> chromadb.Coll
     return collection
 
 
-def build_index(chunks: list[dict[str, str]]) -> None:
+async def build_index(chunks: list[dict[str, str]]) -> None:
     """
     构建 ChromaDB 索引。
 
     将所有 chunk 的 Embedding 向量写入 ChromaDB。
+    Embedding 通过 embed_texts 受限并发生成（同时最多 5 个请求）。
 
     参数:
         chunks: [{"filename": "xxx.txt", "chunk_index": "0", "text": "..."}]
@@ -73,16 +80,19 @@ def build_index(chunks: list[dict[str, str]]) -> None:
         metadata={"description": "Agent 知识库"},
     )
 
-    # 生成所有 chunk 的 Embedding（单个失败就跳过该 chunk）
+    # 并发生成所有 chunk 的 Embedding（单个失败就跳过该 chunk）
+    texts_all = [chunk["text"] for chunk in chunks]
     paired: list[tuple[dict[str, str], list[float]]] = []
 
-    for i, chunk in enumerate(chunks):
-        try:
-            vec = embed_text(chunk["text"])
-            paired.append((chunk, vec))
-        except Exception as e:
-            logger.error("Failed to embed chunk[%d], skipping: %s", i, e)
+    results = await asyncio.gather(
+        *(embed_text(text) for text in texts_all),
+        return_exceptions=True,  # 单个失败不影响其他，失败位置返回异常对象
+    )
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            logger.error("Failed to embed chunk[%d], skipping: %s", i, result)
             continue
+        paired.append((chunks[i], result))
 
     if not paired:
         logger.error("No vectors generated, index build failed.")
@@ -102,8 +112,9 @@ def build_index(chunks: list[dict[str, str]]) -> None:
         for chunk in valid_chunks
     ]
 
-    # 写入 ChromaDB
-    collection.add(
+    # 写入 ChromaDB（本地操作放线程池，不阻塞事件循环）
+    await asyncio.to_thread(
+        collection.add,
         ids=ids,
         embeddings=vectors,
         documents=texts[: len(vectors)],
@@ -113,7 +124,7 @@ def build_index(chunks: list[dict[str, str]]) -> None:
     logger.info("Indexed %d chunks into ChromaDB", len(vectors))
 
 
-def search(query: str, top_k: int = RAG_TOP_K) -> list[dict[str, Any]]:
+async def search(query: str, top_k: int = RAG_TOP_K) -> list[dict[str, Any]]:
     """
     在 ChromaDB 中检索与 query 最相似的文档 chunk。
 
@@ -124,14 +135,14 @@ def search(query: str, top_k: int = RAG_TOP_K) -> list[dict[str, Any]]:
     返回:
         [{"text": "chunk文本", "filename": "来源文件", "distance": 距离}]
     """
-    # 生成 query 的 Embedding
+    # 生成 query 的 Embedding（网络请求，异步）
     try:
-        query_vector = embed_text(query)
+        query_vector = await embed_text(query)
     except Exception as e:
         logger.error("Failed to embed query: %s", e)
         raise RuntimeError(f"查询 Embedding 失败: {e}") from e
 
-    # 查询 ChromaDB
+    # 查询 ChromaDB（本地操作放线程池）
     client = get_chroma_client()
     try:
         collection = client.get_collection(name=COLLECTION_NAME)
@@ -145,7 +156,8 @@ def search(query: str, top_k: int = RAG_TOP_K) -> list[dict[str, Any]]:
         logger.warning("Knowledge base is empty")
         return []
 
-    results = collection.query(
+    results = await asyncio.to_thread(
+        collection.query,
         query_embeddings=[query_vector],
         n_results=min(top_k, collection.count()),
         include=["documents", "metadatas", "distances"],
@@ -169,7 +181,7 @@ def search(query: str, top_k: int = RAG_TOP_K) -> list[dict[str, Any]]:
     return retrieved
 
 
-def is_index_built() -> bool:
+async def is_index_built() -> bool:
     """检查 ChromaDB 索引是否已构建（集合存在且有数据）。"""
     client = get_chroma_client()
     try:

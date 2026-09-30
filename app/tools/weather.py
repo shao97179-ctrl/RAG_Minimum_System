@@ -3,6 +3,10 @@
 
 调用 OpenWeather API 获取指定城市的当前天气信息。
 
+全部使用异步请求（httpx.AsyncClient），网络错误和超时
+会经过指数退避自动重试；但 404（城市不存在）、401（Key 无效）
+这类确定性错误不重试，直接返回错误信息。
+
 LLM 只能看到:
     get_weather(city: str) -> str
 
@@ -14,15 +18,23 @@ from typing import Any
 
 import httpx
 
-from app.config import OPENWEATHER_API_KEY, OPENWEATHER_API_URL
+from app.backoff import with_backoff
+from app.config import OPENWEATHER_API_KEY, OPENWEATHER_API_URL, RETRY_MAX_RETRIES
 
 logger = logging.getLogger(__name__)
 
 # 请求超时（秒）
 REQUEST_TIMEOUT = 10.0
 
+# 值得重试的异常: 超时、连接失败等临时性网络问题。
+# 注意 HTTPStatusError（404/401 等）不在此列 —— 重试也不会有不同结果。
+RETRYABLE_HTTP_ERRORS: tuple[type[Exception], ...] = (
+    httpx.TimeoutException,
+    httpx.TransportError,
+)
 
-def get_weather(city: str) -> str:
+
+async def get_weather(city: str) -> str:
     """
     获取指定城市的当前天气。
 
@@ -45,29 +57,31 @@ def get_weather(city: str) -> str:
         "lang": "zh_cn",         # 返回中文天气描述
     }
 
-    try:
-        response = httpx.get(
-            OPENWEATHER_API_URL,
-            params=params,
-            timeout=REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-    except httpx.TimeoutException:
-        logger.error("OpenWeather API timeout for city: %s", city)
-        return f"错误：获取 {city} 的天气超时，请稍后重试。"
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            logger.error("City not found: %s", city)
-            return f"错误：找不到城市 '{city}'，请检查城市名称是否正确。"
-        elif e.response.status_code == 401:
-            logger.error("OpenWeather API Key invalid")
-            return "错误：OpenWeather API Key 无效，请检查配置。"
-        else:
-            logger.error("OpenWeather API error: %d", e.response.status_code)
-            return f"错误：天气 API 返回错误 ({e.response.status_code})。"
-    except Exception as e:
-        logger.error("OpenWeather request failed: %s", e)
-        return f"错误：获取天气失败 - {e}"
+    # 一次请求会话内创建异步客户端
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+        try:
+            response = await with_backoff(
+                client.get, OPENWEATHER_API_URL, params=params,
+                max_retries=RETRY_MAX_RETRIES,
+                retry_on=RETRYABLE_HTTP_ERRORS,
+            )
+            response.raise_for_status()
+        except httpx.TimeoutException:
+            logger.error("OpenWeather API timeout for city: %s", city)
+            return f"错误：获取 {city} 的天气超时，请稍后重试。"
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                logger.error("City not found: %s", city)
+                return f"错误：找不到城市 '{city}'，请检查城市名称是否正确。"
+            elif e.response.status_code == 401:
+                logger.error("OpenWeather API Key invalid")
+                return "错误：OpenWeather API Key 无效，请检查配置。"
+            else:
+                logger.error("OpenWeather API error: %d", e.response.status_code)
+                return f"错误：天气 API 返回错误 ({e.response.status_code})。"
+        except Exception as e:
+            logger.error("OpenWeather request failed: %s", e)
+            return f"错误：获取天气失败 - {e}"
 
     # 解析响应
     try:

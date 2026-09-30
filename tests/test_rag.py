@@ -39,37 +39,40 @@ class TestChunker:
 class TestSearchKnowledgeBase:
     """RAG 搜索测试。"""
 
-    def test_empty_query(self) -> None:
+    async def test_empty_query(self) -> None:
         """空查询返回错误。"""
-        result = search_knowledge_base("")
+        result = await search_knowledge_base("")
         assert "错误" in result
 
-    def test_not_initialized(self) -> None:
+    async def test_not_initialized(self) -> None:
         """知识库未初始化时给出提示。"""
         # 如果索引已构建，这个测试会跳过
         from app.rag.vector_store import is_index_built
-        if not is_index_built():
-            result = search_knowledge_base("测试查询")
+        if not await is_index_built():
+            result = await search_knowledge_base("测试查询")
             assert "初始化" in result or "错误" in result
 
-    def test_history_passed_to_pipeline(self, monkeypatch) -> None:
+    async def test_history_passed_to_pipeline(self, monkeypatch) -> None:
         """对话历史会透传给检索流水线（供问题重写解决指代）。"""
         from app.tools import rag as rag_tool
 
         captured: dict[str, object] = {}
 
-        def fake_retrieve(query, history=None):
+        async def fake_retrieve(query, history=None):
             captured["query"] = query
             captured["history"] = history
             return [
                 {"text": "ChromaDB 是一个向量数据库", "filename": "a.txt", "distance": 0.1}
             ]
 
+        async def fake_is_built() -> bool:
+            return True
+
         monkeypatch.setattr(rag_tool, "retrieve", fake_retrieve)
-        monkeypatch.setattr(rag_tool, "is_index_built", lambda: True)
+        monkeypatch.setattr(rag_tool, "is_index_built", fake_is_built)
 
         history = [{"role": "user", "content": "我在学 ChromaDB"}]
-        result = rag_tool.search_knowledge_base("它是什么？", history=history)
+        result = await rag_tool.search_knowledge_base("它是什么？", history=history)
 
         assert captured["history"] == history
         assert "ChromaDB 是一个向量数据库" in result

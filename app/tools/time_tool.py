@@ -3,7 +3,7 @@ import logging
 
 
 logger = logging.getLogger(__name__)
-def get_time(format_type: str | None = None) -> str:
+async def get_time(format_type: str | None = None) -> str:
     """
     获取当前日期/时间。
 

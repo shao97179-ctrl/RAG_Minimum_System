@@ -11,7 +11,7 @@ Tool Dispatcher —— 工具分发器。
           ↓
     解析 arguments
           ↓
-    执行函数
+    执行函数（全部为异步调用）
           ↓
     得到结果
           ↓
@@ -21,6 +21,7 @@ Tool Dispatcher —— 工具分发器。
 不关心 Agent 的循环逻辑，也不关心 LLM 的调用方式。
 """
 
+import asyncio
 import inspect
 import json
 import logging
@@ -34,9 +35,9 @@ from app.tools.time_tool import get_time
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────
-# 工具映射表：工具名称 → Python 函数
+# 工具映射表：工具名称 → 异步 Python 函数
 # ──────────────────────────────────────────────
-TOOLS_MAP: dict[str, Callable[..., str]] = {
+TOOLS_MAP: dict[str, Callable[..., Any]] = {
     "search_knowledge_base": search_knowledge_base,
     "get_weather": get_weather,
     "calculate": calculate,
@@ -44,13 +45,13 @@ TOOLS_MAP: dict[str, Callable[..., str]] = {
 }
 
 
-def dispatch_tool(
+async def dispatch_tool(
     tool_name: str,
     tool_args: dict[str, Any],
     history: list[dict[str, Any]] | None = None,
 ) -> str:
     """
-    根据工具名称和参数，执行对应的 Python 函数。
+    根据工具名称和参数，异步执行对应的 Python 函数。
 
     这是 Tool Dispatcher 的核心函数。
 
@@ -82,7 +83,7 @@ def dispatch_tool(
         kwargs["history"] = history
 
     try:
-        result = func(**kwargs)
+        result = await func(**kwargs)
         logger.info("Tool finished: %s", tool_name)
         return result
     except TypeError as e:
@@ -95,7 +96,7 @@ def dispatch_tool(
         return error_msg
 
 
-def _accepts_history(func: Callable[..., str]) -> bool:
+def _accepts_history(func: Callable[..., Any]) -> bool:
     """检查工具函数是否声明了 history 参数。"""
     try:
         return "history" in inspect.signature(func).parameters

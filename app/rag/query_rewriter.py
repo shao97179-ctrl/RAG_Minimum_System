@@ -11,7 +11,7 @@
 
     它和 Milvus 有什么区别？ → ChromaDB 和 Milvus 有什么区别？
 
-实现方式: 调用一次 GLM（不带工具）。任何失败都退回原始查询，
+实现方式: 异步调用一次 GLM（不带工具）。任何失败都退回原始查询，
 绝不阻断后面的检索流程。
 """
 
@@ -43,7 +43,7 @@ REWRITE_PROMPT = """你是搜索查询优化器。请把"用户最新问题"改�
 改写后的查询:"""
 
 
-def rewrite_query(query: str, history: list[dict[str, Any]] | None = None) -> str:
+async def rewrite_query(query: str, history: list[dict[str, Any]] | None = None) -> str:
     """
     把用户问题重写为适合检索的独立查询。
 
@@ -65,7 +65,7 @@ def rewrite_query(query: str, history: list[dict[str, Any]] | None = None) -> st
             history=_format_history(history) or "（无）",
             query=query,
         )
-        response = chat_without_tools([{"role": "user", "content": prompt}])
+        response = await chat_without_tools([{"role": "user", "content": prompt}])
         rewritten = (response.choices[0].message.content or "").strip()
     except Exception as e:
         logger.warning("Query rewrite failed, using original query: %s", e)

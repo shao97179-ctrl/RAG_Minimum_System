@@ -12,9 +12,13 @@ Mini Agent —— 最小但完整的 Agent 系统
 
 Agent 核心流程:
     用户输入 → 智谱 GLM → Function Calling → Tool Dispatcher → 执行工具 → 返回结果 → GLM 最终回答
+
+全流程异步: LLM 调用、RAG 检索、工具执行都是 async/await，
+网络请求失败自动按指数退避重试（见 app/backoff.py）。
 """
 
 import argparse
+import asyncio
 import logging
 import sys
 
@@ -31,11 +35,11 @@ def fail_fast(message: str) -> None:
     sys.exit(1)
 
 
-def init_rag() -> None:
+async def init_rag() -> None:
     """
-    初始化 RAG 知识库。
+    初始化 RAG 知识库（异步）。
 
-    流程: 读取文档 → 文本切分 → 生成 Embedding → 写入 ChromaDB
+    流程: 读取文档 → 文本切分 → 并发生成 Embedding → 写入 ChromaDB
     """
     from app.config import validate_config
     from app.rag.loader import load_documents
@@ -68,23 +72,23 @@ def init_rag() -> None:
     logger.info("切分为 %d 个 chunk", len(chunks))
 
     # 3. 生成 Embedding 并写入 ChromaDB
-    logger.info("正在生成 Embedding 并构建索引（这可能需要几分钟）...")
+    logger.info("正在并发生成 Embedding 并构建索引（这可能需要几分钟）...")
     try:
-        build_index(chunks)
+        await build_index(chunks)
     except Exception as e:
         fail_fast(f"索引构建失败: {e}")
 
     # 4. 验证
-    if is_index_built():
+    if await is_index_built():
         logger.info("RAG 知识库初始化完成！")
         print("RAG 知识库初始化完成！")
     else:
         fail_fast("索引构建后验证失败")
 
 
-def run_agent() -> None:
+async def run_agent() -> None:
     """
-    启动 Agent 交互式对话。
+    启动 Agent 交互式对话（异步）。
 
     用户可以输入问题，Agent 根据问题自动判断是否需要调用工具。
     对话内命令:
@@ -103,7 +107,7 @@ def run_agent() -> None:
         fail_fast(f"配置校验失败: {e}")
 
     # 检查 RAG 知识库是否已初始化
-    if not is_index_built():
+    if not await is_index_built():
         logger.warning(
             "RAG 知识库尚未初始化。"
             "请先运行: python main.py --init-rag"
@@ -124,6 +128,8 @@ def run_agent() -> None:
 
     while True:
         try:
+            # input() 是阻塞的，但单用户 CLI 场景下没有其他协程需要运行，
+            # 等待用户输入时阻塞事件循环没有影响
             user_input = input("用户: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n再见！")
@@ -150,9 +156,9 @@ def run_agent() -> None:
             print("再见！")
             break
 
-        # 调用 Agent
+        # 调用 Agent（异步执行整轮对话）
         try:
-            answer = agent_loop(user_input, history)
+            answer = await agent_loop(user_input, history)
             print(f"\nAgent: {answer}\n")
         except Exception as e:
             logger.error("Agent error: %s", e, exc_info=True)
@@ -174,9 +180,10 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.init_rag:
-        init_rag()
+        # asyncio.run: 创建事件循环并运行协程直到完成
+        asyncio.run(init_rag())
     else:
-        run_agent()
+        asyncio.run(run_agent())
 
 
 if __name__ == "__main__":
